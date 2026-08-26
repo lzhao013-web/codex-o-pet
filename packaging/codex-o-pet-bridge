@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PLATFORM=$(uname -s)
+ARCH=$(uname -m)
+
+case "$PLATFORM:$ARCH" in
+    Linux:x86_64 | Linux:amd64)
+        BRIDGE=codex-o-pet-bridge-linux-x86_64
+        ;;
+    Linux:aarch64 | Linux:arm64)
+        BRIDGE=codex-o-pet-bridge-linux-aarch64
+        ;;
+    Darwin:x86_64 | Darwin:amd64)
+        BRIDGE=codex-o-pet-bridge-macos-x86_64
+        ;;
+    Darwin:arm64 | Darwin:aarch64)
+        BRIDGE=codex-o-pet-bridge-macos-aarch64
+        ;;
+    *)
+        echo "codex-o-pet: unsupported platform $PLATFORM/$ARCH" >&2
+        exit 1
+        ;;
+esac
+
+exec "$BIN_DIR/$BRIDGE" "$@"

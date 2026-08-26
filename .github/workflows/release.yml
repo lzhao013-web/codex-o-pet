@@ -1,0 +1,174 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+      - name: Verify source
+        run: |
+          cargo fmt --check
+          cargo check --locked
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+
+  build:
+    name: Build ${{ matrix.artifact }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: bridge-windows-x86_64
+            suffix: .exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: bridge-linux-x86_64
+            suffix: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: bridge-linux-aarch64
+            suffix: ""
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: bridge-macos-x86_64
+            suffix: ""
+          - os: macos-15
+            target: aarch64-apple-darwin
+            artifact: bridge-macos-aarch64
+            suffix: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+      - name: Build Bridge
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Stage Bridge
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/codex-o-pet-bridge${{ matrix.suffix }}" staging/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-*
+          path: ${{ runner.temp }}/bridge-artifacts
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            echo "workflow_dispatch must run from a vX.Y.Z tag" >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          plugin_version=$(python3 -c 'import json; print(json.load(open("plugin/.codex-plugin/plugin.json"))["version"])')
+          test "$version" = "$cargo_version"
+          test "$version" = "$plugin_version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Package universal plugin
+        shell: bash
+        run: |
+          ./scripts/package-plugin.sh \
+            "$RUNNER_TEMP/bridge-artifacts" \
+            "$RUNNER_TEMP/publication" \
+            "${{ steps.version.outputs.version }}"
+      - name: Test packaged Linux Bridge
+        shell: bash
+        run: |
+          request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}'
+          response=$(printf '%s\n' "$request" | \
+            O_PET_ENDPOINT="$RUNNER_TEMP/o-pet-test.sock" \
+            "$RUNNER_TEMP/publication/plugin/bin/codex-o-pet-bridge")
+          RESPONSE="$response" python3 - <<'PY'
+          import json
+          import os
+
+          response = json.loads(os.environ["RESPONSE"])
+          assert response["id"] == 1
+          assert response["result"]["serverInfo"]["name"] == "codex-o-pet-bridge"
+          PY
+      - name: Create release archives
+        shell: bash
+        run: |
+          set -eu
+          assets="$RUNNER_TEMP/release-assets"
+          artifacts="$RUNNER_TEMP/bridge-artifacts"
+          publication="$RUNNER_TEMP/publication"
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p "$assets" "$RUNNER_TEMP/archive"
+
+          (cd "$publication/plugin" && zip -qr "$assets/codex-o-pet-plugin-v$version.zip" .)
+          tar -C "$publication/plugin" -czf "$assets/codex-o-pet-plugin-v$version.tar.gz" .
+
+          cp "$artifacts/bridge-windows-x86_64/codex-o-pet-bridge.exe" \
+            "$RUNNER_TEMP/archive/codex-o-pet-bridge.exe"
+          (cd "$RUNNER_TEMP/archive" && zip -q "$assets/codex-o-pet-bridge-v$version-windows-x86_64.zip" codex-o-pet-bridge.exe)
+          rm -f "$RUNNER_TEMP/archive/"*
+
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            cp "$artifacts/bridge-$target/codex-o-pet-bridge" \
+              "$RUNNER_TEMP/archive/codex-o-pet-bridge"
+            chmod 755 "$RUNNER_TEMP/archive/codex-o-pet-bridge"
+            tar -C "$RUNNER_TEMP/archive" -czf \
+              "$assets/codex-o-pet-bridge-v$version-$target.tar.gz" \
+              codex-o-pet-bridge
+            rm -f "$RUNNER_TEMP/archive/"*
+          done
+      - name: Publish plugin-dist branch
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git checkout --orphan plugin-dist-build
+          git rm -rf .
+          git clean -fdx
+          cp -R "$RUNNER_TEMP/publication/." .
+          git add -A
+          git commit -m "Publish plugin v${{ steps.version.outputs.version }}"
+          git push --force origin HEAD:plugin-dist
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$RUNNER_TEMP/release-assets/"* --clobber
+          else
+            gh release create "$tag" "$RUNNER_TEMP/release-assets/"* \
+              --title "codex-o-pet $tag" \
+              --generate-notes
+          fi

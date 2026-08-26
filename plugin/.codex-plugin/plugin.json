@@ -2,15 +2,24 @@
   "name": "codex-o-pet",
   "version": "0.1.0",
   "description": "Drive an o-pet desktop companion from Codex lifecycle hooks.",
+  "author": {
+    "name": "lzhao013-web",
+    "url": "https://github.com/lzhao013-web"
+  },
+  "homepage": "https://github.com/lzhao013-web/codex-o-pet",
+  "repository": "https://github.com/lzhao013-web/codex-o-pet",
+  "license": "AGPL-3.0-only",
+  "keywords": ["codex", "o-pet", "desktop-companion"],
   "mcpServers": "./mcp.json",
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Codex o-pet",
     "shortDescription": "Visualize Codex activity with the o-pet desktop companion.",
     "longDescription": "Uses trusted Codex lifecycle hooks and a model-hidden MCP tool to forward activity to an unchanged o-pet process.",
-    "developerName": "codex-o-pet contributors",
+    "developerName": "lzhao013-web",
     "category": "Developer Tools",
     "capabilities": ["Agent activity visualization"],
+    "websiteURL": "https://github.com/lzhao013-web/codex-o-pet",
     "brandColor": "#6F8C7C"
   }
 }
