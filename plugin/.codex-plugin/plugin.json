@@ -1,0 +1,16 @@
+{
+  "name": "codex-o-pet",
+  "version": "0.1.0",
+  "description": "Drive an o-pet desktop companion from Codex lifecycle hooks.",
+  "mcpServers": "./mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Codex o-pet",
+    "shortDescription": "Visualize Codex activity with the o-pet desktop companion.",
+    "longDescription": "Uses trusted Codex lifecycle hooks and a model-hidden MCP tool to forward activity to an unchanged o-pet process.",
+    "developerName": "codex-o-pet contributors",
+    "category": "Developer Tools",
+    "capabilities": ["Agent activity visualization"],
+    "brandColor": "#6F8C7C"
+  }
+}

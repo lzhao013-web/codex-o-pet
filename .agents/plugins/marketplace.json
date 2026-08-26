@@ -1,0 +1,12 @@
+{
+  "name": "codex-o-pet-local",
+  "plugins": [
+    {
+      "name": "codex-o-pet",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      }
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "description": "Forward Codex lifecycle activity to the model-hidden codex-o-pet MCP tool.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "session_start",
+              "sessionId": "${session_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "user_prompt_submit",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "pre_tool_use",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}",
+              "toolName": "${tool_name}",
+              "toolUseId": "${tool_use_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "post_tool_use",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}",
+              "toolName": "${tool_name}",
+              "toolUseId": "${tool_use_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "stop",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
