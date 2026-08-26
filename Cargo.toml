@@ -3,6 +3,9 @@ name = "codex-o-pet-bridge"
 version = "0.1.0"
 edition = "2024"
 publish = false
+description = "Connect Codex lifecycle activity to the o-pet desktop companion."
+license = "AGPL-3.0-only"
+repository = "https://github.com/lzhao013-web/codex-o-pet"
 
 [dependencies]
 interprocess = "2.4.3"

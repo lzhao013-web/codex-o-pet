@@ -85,6 +85,10 @@ Codex lifecycle Hooks
 - 失败的工具调用可能保持工具动画，直到下一次状态更新或当前轮次结束。
 - 插件只向 o-pet 发送活动状态，不支持通过桌宠批准操作或提交提示词。
 
+## 开源协议
+
+本项目采用 [GNU Affero General Public License v3.0](LICENSE)，与 o-pet 保持一致。
+
 ## 开发验证
 
 ```bash
