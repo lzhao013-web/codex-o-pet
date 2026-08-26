@@ -178,17 +178,17 @@ fn default_endpoint() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::Read,
-        sync::atomic::{AtomicU64, Ordering},
-        thread,
-    };
+    use std::{io::Read, thread};
+
+    #[cfg(windows)]
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use interprocess::local_socket::{ListenerOptions, traits::Listener as _};
     use serde_json::json;
 
     use super::*;
 
+    #[cfg(windows)]
     static NEXT_ENDPOINT: AtomicU64 = AtomicU64::new(1);
 
     #[test]
