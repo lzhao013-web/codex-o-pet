@@ -129,7 +129,9 @@ mcp = json.loads((root / "plugin/mcp.json").read_text())
 marketplace = json.loads((root / ".agents/plugins/marketplace.json").read_text())
 
 assert manifest["name"] == "codex-o-pet"
-assert mcp["mcpServers"]["codex-o-pet"]["command"] == "./bin/codex-o-pet-bridge"
+server = mcp["mcpServers"]["codex-o-pet"]
+assert server["command"] == "./bin/codex-o-pet-bridge"
+assert server["env_vars"] == ["XDG_RUNTIME_DIR", "O_PET_ENDPOINT"]
 assert marketplace["plugins"][0]["source"]["path"] == "./plugin"
 
 expected = {

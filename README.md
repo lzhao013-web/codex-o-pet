@@ -41,7 +41,7 @@ codex plugin marketplace add lzhao013-web/codex-o-pet --ref plugin-dist
 if ($LASTEXITCODE -eq 0) { codex plugin add codex-o-pet@codex-o-pet }
 ```
 
-仓库为私有状态时，Git 必须拥有该仓库的读取权限。Codex 首次加载插件 Hooks 时可能要求审核。检查 Hook 定义后按提示信任并启用即可。
+Codex 首次加载插件 Hooks 时可能要求审核。检查 Hook 定义后按提示信任并启用即可。
 
 ## 使用
 
@@ -63,7 +63,7 @@ Codex lifecycle Hooks
   -> o-pet
 ```
 
-可以通过 `O_PET_ENDPOINT` 环境变量覆盖 Bridge 与 o-pet 使用的 IPC 端点。
+插件会将 `XDG_RUNTIME_DIR` 和 `O_PET_ENDPOINT` 从 Codex 的本地环境传递给 Bridge。Linux 默认使用 `$XDG_RUNTIME_DIR/o-pet.sock`；也可以通过 `O_PET_ENDPOINT` 环境变量覆盖 Bridge 与 o-pet 使用的 IPC 端点。
 
 ## 发布
 
