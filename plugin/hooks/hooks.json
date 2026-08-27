@@ -86,7 +86,8 @@
               "kind": "subagent_start",
               "sessionId": "${session_id}",
               "turnId": "${turn_id}",
-              "agentId": "${agent_id}"
+              "agentId": "${agent_id}",
+              "agentType": "${agent_type}"
             },
             "timeout": 2
           }
@@ -105,7 +106,8 @@
               "kind": "subagent_stop",
               "sessionId": "${session_id}",
               "turnId": "${turn_id}",
-              "agentId": "${agent_id}"
+              "agentId": "${agent_id}",
+              "agentType": "${agent_type}"
             },
             "timeout": 2
           }

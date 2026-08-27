@@ -1,8 +1,10 @@
-use std::{io, time::Instant};
+use std::{env, io, time::Instant};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::events::{BridgeEvent, EventMapper};
+
+const LOG_ENV: &str = "O_PET_LOG";
 
 pub trait PetTransport {
     fn deliver(&mut self, session_id: &str, events: &[Value]) -> io::Result<()>;
@@ -12,6 +14,7 @@ pub struct McpServer<P> {
     pet: P,
     mapper: EventMapper,
     last_delivery_error: Option<String>,
+    diagnostics: bool,
 }
 
 impl<P: PetTransport> McpServer<P> {
@@ -20,6 +23,7 @@ impl<P: PetTransport> McpServer<P> {
             pet,
             mapper: EventMapper::default(),
             last_delivery_error: None,
+            diagnostics: diagnostics_enabled(),
         }
     }
 
@@ -83,7 +87,14 @@ impl<P: PetTransport> McpServer<P> {
             Ok(event) => event,
             Err(error) => return tool_error(&format!("invalid emit arguments: {error}")),
         };
+        let diagnostic_summary = self.diagnostics.then(|| event.diagnostic_summary());
         let batch = self.mapper.map(event, Instant::now());
+        if let Some(summary) = diagnostic_summary {
+            eprintln!(
+                "codex-o-pet: {summary} mapped_events={}",
+                batch.events.len()
+            );
+        }
         match self.pet.deliver(&batch.session_id, &batch.events) {
             Ok(()) => {
                 if self.last_delivery_error.take().is_some() {
@@ -134,32 +145,7 @@ fn tools_list() -> Value {
         "tools": [{
             "name": "emit",
             "description": "Forward one trusted Codex lifecycle event to the local o-pet process.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "session_start",
-                            "user_prompt_submit",
-                            "pre_tool_use",
-                            "post_tool_use",
-                            "subagent_start",
-                            "subagent_stop",
-                            "pre_compact",
-                            "post_compact",
-                            "stop"
-                        ]
-                    },
-                    "sessionId": { "type": "string" },
-                    "turnId": { "type": "string" },
-                    "toolName": { "type": "string" },
-                    "toolUseId": { "type": "string" },
-                    "agentId": { "type": "string" }
-                },
-                "required": ["kind", "sessionId"],
-                "additionalProperties": false
-            },
+            "inputSchema": bridge_event_input_schema(),
             "annotations": {
                 "readOnlyHint": true,
                 "destructiveHint": false,
@@ -171,6 +157,56 @@ fn tools_list() -> Value {
             }
         }]
     })
+}
+
+fn bridge_event_input_schema() -> Value {
+    json!({
+        "oneOf": [
+            bridge_event_variant_schema("session_start", &["sessionId"]),
+            bridge_event_variant_schema("user_prompt_submit", &["sessionId", "turnId"]),
+            bridge_event_variant_schema(
+                "pre_tool_use",
+                &["sessionId", "turnId", "toolName", "toolUseId"],
+            ),
+            bridge_event_variant_schema(
+                "post_tool_use",
+                &["sessionId", "turnId", "toolName", "toolUseId"],
+            ),
+            bridge_event_variant_schema(
+                "subagent_start",
+                &["sessionId", "turnId", "agentId", "agentType"],
+            ),
+            bridge_event_variant_schema(
+                "subagent_stop",
+                &["sessionId", "turnId", "agentId", "agentType"],
+            ),
+            bridge_event_variant_schema("pre_compact", &["sessionId", "turnId"]),
+            bridge_event_variant_schema("post_compact", &["sessionId", "turnId"]),
+            bridge_event_variant_schema("stop", &["sessionId", "turnId"]),
+        ]
+    })
+}
+
+fn bridge_event_variant_schema(kind: &str, fields: &[&str]) -> Value {
+    let mut properties = Map::new();
+    properties.insert("kind".to_string(), json!({ "const": kind }));
+    for field in fields {
+        properties.insert((*field).to_string(), json!({ "type": "string" }));
+    }
+
+    let required = std::iter::once("kind")
+        .chain(fields.iter().copied())
+        .collect::<Vec<_>>();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+fn diagnostics_enabled() -> bool {
+    env::var(LOG_ENV).is_ok_and(|value| value.eq_ignore_ascii_case("debug"))
 }
 
 #[cfg(test)]
@@ -217,6 +253,13 @@ mod tests {
 
         assert_eq!(tool["name"], "emit");
         assert_eq!(tool["_meta"]["ui"]["visibility"], json!([]));
+        assert_eq!(
+            tool["inputSchema"]["oneOf"]
+                .as_array()
+                .expect("event schema variants")
+                .len(),
+            9
+        );
     }
 
     #[test]
@@ -254,13 +297,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unexpected_sensitive_fields_at_the_tool_boundary() {
+        let mut server = McpServer::new(FakePet::default());
+        let response = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"emit","arguments":{"kind":"user_prompt_submit","sessionId":"session-1","turnId":"turn-1","prompt":"private"}}}"#,
+            )
+            .expect("response");
+
+        assert_eq!(response["result"]["isError"], true);
+        assert!(server.pet.deliveries.is_empty());
+    }
+
+    #[test]
     fn every_plugin_hook_input_matches_the_emit_contract() {
         let config = serde_json::from_str::<Value>(include_str!("../plugin/hooks/hooks.json"))
             .expect("valid plugin hooks JSON");
         let schema = tools_list();
-        let schema_kinds = schema["tools"][0]["inputSchema"]["properties"]["kind"]["enum"]
+        let schema_variants = schema["tools"][0]["inputSchema"]["oneOf"]
             .as_array()
-            .expect("emit kind enum");
+            .expect("emit event variants");
         let hook_groups = config["hooks"].as_object().expect("hook event map");
         let mut input_count = 0;
 
@@ -269,12 +325,30 @@ mod tests {
                 for hook in group["hooks"].as_array().expect("hook handlers") {
                     let input = hook["input"].clone();
                     let kind = input["kind"].as_str().expect("hook input kind").to_string();
-                    assert!(
-                        schema_kinds
-                            .iter()
-                            .any(|candidate| candidate == kind.as_str()),
-                        "hook kind {kind} is missing from the emit schema"
-                    );
+                    let variant = schema_variants
+                        .iter()
+                        .find(|candidate| {
+                            candidate["properties"]["kind"]["const"].as_str() == Some(kind.as_str())
+                        })
+                        .unwrap_or_else(|| panic!("hook kind {kind} is missing from the schema"));
+                    let properties = variant["properties"]
+                        .as_object()
+                        .expect("variant properties");
+                    let required = variant["required"].as_array().expect("required fields");
+                    let input_object = input.as_object().expect("hook input object");
+                    for field in required {
+                        let field = field.as_str().expect("required field name");
+                        assert!(
+                            input_object.contains_key(field),
+                            "hook kind {kind} misses {field}"
+                        );
+                    }
+                    for field in input_object.keys() {
+                        assert!(
+                            properties.contains_key(field),
+                            "hook kind {kind} has unexpected field {field}"
+                        );
+                    }
                     serde_json::from_value::<BridgeEvent>(input)
                         .unwrap_or_else(|error| panic!("hook kind {kind} is invalid: {error}"));
                     input_count += 1;

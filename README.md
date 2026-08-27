@@ -51,7 +51,7 @@ Codex 首次加载插件 Hooks 时可能要求审核。检查 Hook 定义后按�
 2. 启动新的 Codex 会话。
 3. 正常使用 Codex。桌宠会根据会话和工具调用状态播放动画。
 
-如果 o-pet 没有运行，插件不会中断 Codex 任务。Bridge 会在内存中保留最近 256 条未发送的状态事件，并在后续 Hook 触发时重新连接和按顺序补发。同一 Bridge 进程切换到其他 Codex 会话时，旧会话的待发送事件会被丢弃。
+如果 o-pet 没有运行，插件不会中断 Codex 任务。Bridge 会为每个 Codex 会话在内存中保留最近 256 条未发送的状态事件，并在后续 Hook 触发时重新连接和按顺序补发。一个 Bridge 进程最多同时保留 16 个会话连接；超过上限时会关闭并淘汰最久未使用的会话。
 
 ## 工作方式
 
@@ -63,14 +63,18 @@ Codex lifecycle Hooks
   -> o-pet
 ```
 
-插件会将 `XDG_RUNTIME_DIR` 和 `O_PET_ENDPOINT` 从 Codex 的本地环境传递给 Bridge。Linux 默认使用 `$XDG_RUNTIME_DIR/o-pet.sock`；也可以通过 `O_PET_ENDPOINT` 环境变量覆盖 Bridge 与 o-pet 使用的 IPC 端点。
+插件会将 `XDG_RUNTIME_DIR`、`O_PET_ENDPOINT` 和 `O_PET_LOG` 从 Codex 的本地环境传递给 Bridge。Linux 默认使用 `$XDG_RUNTIME_DIR/o-pet.sock`；也可以通过 `O_PET_ENDPOINT` 环境变量覆盖 Bridge 与 o-pet 使用的 IPC 端点。
 
 当前 Hook 映射包括：
 
 - 会话和提示词活动。
-- 本地命令、文件修改、MCP 等可观察工具的开始与结束。
-- 子代理的实际运行周期；启动子代理的短暂工具调用会被去重。
+- 本地命令、文件修改、MCP 等可观察工具的开始与结束；Bridge 只根据工具名将读取、搜索、写入、下载、终端和规划类工具映射到更具体的动画。
+- 子代理的实际运行周期；启动子代理的短暂工具调用会被去重，探索和审查类子代理显示为搜索，执行类子代理显示为编码，其他类型显示为咨询。
 - 手动或自动上下文压缩，使用 o-pet 的 `skill` 工具动画表示。
+
+Bridge 的 Hook 输入采用按事件区分的严格字段集合。提示词正文、工具参数、工具输出以及回复正文都不在允许字段中，意外传入时会在 Bridge 边界被拒绝。
+
+如需排查未识别的工具动画，可以在启动 Codex 前设置 `O_PET_LOG=debug`。诊断日志只输出 Hook 类型、工具名或子代理类型以及映射后的事件数量，不输出会话 ID、调用 ID 或任何内容正文。
 
 ## 发布
 

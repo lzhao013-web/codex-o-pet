@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BridgeEvent {
     SessionStart {
         #[serde(rename = "sessionId")]
@@ -43,6 +43,8 @@ pub enum BridgeEvent {
         turn_id: String,
         #[serde(rename = "agentId")]
         agent_id: String,
+        #[serde(rename = "agentType")]
+        agent_type: String,
     },
     SubagentStop {
         #[serde(rename = "sessionId")]
@@ -51,6 +53,8 @@ pub enum BridgeEvent {
         turn_id: String,
         #[serde(rename = "agentId")]
         agent_id: String,
+        #[serde(rename = "agentType")]
+        agent_type: String,
     },
     PreCompact {
         #[serde(rename = "sessionId")]
@@ -86,6 +90,28 @@ impl BridgeEvent {
             | Self::Stop { session_id, .. } => session_id,
         }
     }
+
+    pub fn diagnostic_summary(&self) -> String {
+        match self {
+            Self::PreToolUse { tool_name, .. } => {
+                format!("hook=pre_tool_use tool={tool_name:?}")
+            }
+            Self::PostToolUse { tool_name, .. } => {
+                format!("hook=post_tool_use tool={tool_name:?}")
+            }
+            Self::SubagentStart { agent_type, .. } => {
+                format!("hook=subagent_start agent_type={agent_type:?}")
+            }
+            Self::SubagentStop { agent_type, .. } => {
+                format!("hook=subagent_stop agent_type={agent_type:?}")
+            }
+            Self::SessionStart { .. } => "hook=session_start".to_string(),
+            Self::UserPromptSubmit { .. } => "hook=user_prompt_submit".to_string(),
+            Self::PreCompact { .. } => "hook=pre_compact".to_string(),
+            Self::PostCompact { .. } => "hook=post_compact".to_string(),
+            Self::Stop { .. } => "hook=stop".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -96,7 +122,7 @@ pub struct MappedBatch {
 
 #[derive(Debug, Default)]
 pub struct EventMapper {
-    turn_started_at: HashMap<String, Instant>,
+    turn_started_at: HashMap<(String, String), Instant>,
 }
 
 impl EventMapper {
@@ -105,7 +131,10 @@ impl EventMapper {
         let events = match event {
             BridgeEvent::SessionStart { .. } => Vec::new(),
             BridgeEvent::UserPromptSubmit { turn_id, .. } => {
-                let first_prompt = self.turn_started_at.insert(turn_id, now).is_none();
+                let first_prompt = self
+                    .turn_started_at
+                    .insert((session_id.clone(), turn_id), now)
+                    .is_none();
                 vec![json!({
                     "type": if first_prompt { "agent_started" } else { "turn_started" }
                 })]
@@ -140,10 +169,14 @@ impl EventMapper {
                     })]
                 }
             }
-            BridgeEvent::SubagentStart { agent_id, .. } => vec![json!({
+            BridgeEvent::SubagentStart {
+                agent_id,
+                agent_type,
+                ..
+            } => vec![json!({
                 "type": "tool_started",
                 "toolCallId": agent_id,
-                "toolName": "skill",
+                "toolName": normalize_agent_type(&agent_type),
             })],
             BridgeEvent::SubagentStop { agent_id, .. } => vec![json!({
                 "type": "tool_finished",
@@ -163,7 +196,7 @@ impl EventMapper {
             BridgeEvent::Stop { turn_id, .. } => {
                 let duration_ms = self
                     .turn_started_at
-                    .remove(&turn_id)
+                    .remove(&(session_id.clone(), turn_id))
                     .map(|started| now.saturating_duration_since(started).as_millis())
                     .unwrap_or(0)
                     .try_into()
@@ -192,7 +225,8 @@ fn is_subagent_launcher(tool_name: &str) -> bool {
 }
 
 fn normalize_tool_name(tool_name: &str) -> String {
-    match tool_name.to_ascii_lowercase().as_str() {
+    let lowercase = tool_name.to_ascii_lowercase();
+    match lowercase.as_str() {
         "bash" | "shell" | "commandexecution" => "bash".to_string(),
         "apply_patch" | "edit" | "write" | "filechange" => "write".to_string(),
         "read" => "read".to_string(),
@@ -201,7 +235,50 @@ fn normalize_tool_name(tool_name: &str) -> String {
         "web_search" | "websearch" | "web_search_call" => "websearch".to_string(),
         "web_fetch" | "webfetch" => "webfetch".to_string(),
         "spawn_agent" | "agent" | "skill" => "skill".to_string(),
-        _ => tool_name.to_string(),
+        _ => semantic_tool_name(&lowercase)
+            .map(str::to_string)
+            .unwrap_or_else(|| tool_name.to_string()),
+    }
+}
+
+fn semantic_tool_name(tool_name: &str) -> Option<&'static str> {
+    let tokens = tool_name
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let has = |candidates: &[&str]| {
+        tokens
+            .iter()
+            .any(|token| candidates.iter().any(|candidate| token == candidate))
+    };
+
+    if has(&["agent", "delegate", "goal", "plan", "skill"]) {
+        Some("skill")
+    } else if has(&["bash", "command", "exec", "shell", "terminal"]) {
+        Some("bash")
+    } else if has(&["download", "fetch", "receive"]) {
+        Some("webfetch")
+    } else if has(&[
+        "apply", "copy", "create", "delete", "edit", "move", "patch", "remove", "replace",
+        "update", "write",
+    ]) {
+        Some("write")
+    } else if has(&["browse", "lookup", "search"]) {
+        Some("websearch")
+    } else if has(&[
+        "find", "get", "grep", "inspect", "list", "open", "query", "read", "view",
+    ]) {
+        Some("read")
+    } else {
+        None
+    }
+}
+
+fn normalize_agent_type(agent_type: &str) -> String {
+    match agent_type.to_ascii_lowercase().as_str() {
+        "bug-analyzer" | "code-reviewer" | "explorer" => "read".to_string(),
+        "ui-sketcher" | "worker" => "write".to_string(),
+        _ => "skill".to_string(),
     }
 }
 
@@ -299,13 +376,61 @@ mod tests {
     }
 
     #[test]
-    fn keeps_unknown_tool_names_for_o_pet_tooling_fallback() {
-        assert_eq!(
-            normalize_tool_name("mcp__github__search"),
-            "mcp__github__search"
-        );
+    fn classifies_semantic_tool_names_without_reading_tool_input() {
+        assert_eq!(normalize_tool_name("mcp__github__search"), "websearch");
+        assert_eq!(normalize_tool_name("mcp__filesystem__read_file"), "read");
+        assert_eq!(normalize_tool_name("mcp__github__create_issue"), "write");
+        assert_eq!(normalize_tool_name("update_plan"), "skill");
         assert_eq!(normalize_tool_name("Bash"), "bash");
         assert_eq!(normalize_tool_name("web_search"), "websearch");
+        assert_eq!(normalize_tool_name("custom_tool"), "custom_tool");
+    }
+
+    #[test]
+    fn tracks_equal_turn_ids_independently_across_sessions() {
+        let mut mapper = EventMapper::default();
+        let now = Instant::now();
+
+        for session_id in ["session-1", "session-2"] {
+            let started = mapper.map(
+                BridgeEvent::UserPromptSubmit {
+                    session_id: session_id.into(),
+                    turn_id: "turn-1".into(),
+                },
+                now,
+            );
+            assert_eq!(started.events, vec![json!({ "type": "agent_started" })]);
+        }
+
+        let stopped = mapper.map(
+            BridgeEvent::Stop {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+            },
+            now + Duration::from_millis(250),
+        );
+        assert_eq!(stopped.events[1]["durationMs"], 250);
+
+        let continued = mapper.map(
+            BridgeEvent::UserPromptSubmit {
+                session_id: "session-2".into(),
+                turn_id: "turn-1".into(),
+            },
+            now + Duration::from_millis(500),
+        );
+        assert_eq!(continued.events, vec![json!({ "type": "turn_started" })]);
+    }
+
+    #[test]
+    fn rejects_unknown_bridge_event_fields() {
+        let event = json!({
+            "kind": "user_prompt_submit",
+            "sessionId": "session-1",
+            "turnId": "turn-1",
+            "prompt": "must not cross the bridge boundary",
+        });
+
+        assert!(serde_json::from_value::<BridgeEvent>(event).is_err());
     }
 
     #[test]
@@ -329,6 +454,7 @@ mod tests {
                 session_id: "session-1".into(),
                 turn_id: "turn-1".into(),
                 agent_id: "agent-1".into(),
+                agent_type: "explorer".into(),
             },
             now,
         );
@@ -337,7 +463,7 @@ mod tests {
             vec![json!({
                 "type": "tool_started",
                 "toolCallId": "agent-1",
-                "toolName": "skill",
+                "toolName": "read",
             })]
         );
 
@@ -346,6 +472,7 @@ mod tests {
                 session_id: "session-1".into(),
                 turn_id: "turn-1".into(),
                 agent_id: "agent-1".into(),
+                agent_type: "explorer".into(),
             },
             now,
         );
@@ -379,6 +506,31 @@ mod tests {
             now,
         );
         assert!(launcher_alias.events.is_empty());
+    }
+
+    #[test]
+    fn maps_known_subagent_roles_to_specific_activities() {
+        assert_eq!(normalize_agent_type("explorer"), "read");
+        assert_eq!(normalize_agent_type("code-reviewer"), "read");
+        assert_eq!(normalize_agent_type("bug-analyzer"), "read");
+        assert_eq!(normalize_agent_type("worker"), "write");
+        assert_eq!(normalize_agent_type("ui-sketcher"), "write");
+        assert_eq!(normalize_agent_type("custom-agent"), "skill");
+    }
+
+    #[test]
+    fn diagnostics_include_only_lifecycle_metadata() {
+        let event = BridgeEvent::PreToolUse {
+            session_id: "private-session-id".into(),
+            turn_id: "private-turn-id".into(),
+            tool_name: "mcp__github__search".into(),
+            tool_use_id: "private-tool-id".into(),
+        };
+
+        assert_eq!(
+            event.diagnostic_summary(),
+            r#"hook=pre_tool_use tool="mcp__github__search""#
+        );
     }
 
     #[test]

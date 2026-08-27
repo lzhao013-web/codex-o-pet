@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, env, io, io::Write, path::PathBuf};
+use std::{
+    collections::{HashMap, VecDeque},
+    env, io,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use interprocess::local_socket::{GenericFilePath, Stream, ToFsName as _, traits::Stream as _};
 use serde_json::{Value, json};
@@ -8,12 +13,18 @@ use crate::mcp::PetTransport;
 const ENDPOINT_ENV: &str = "O_PET_ENDPOINT";
 const CLIENT_ID: &str = "codex-o-pet";
 const MAX_PENDING_EVENTS: usize = 256;
+const MAX_SESSIONS: usize = 16;
 
 pub struct PetClient {
     endpoint: PathBuf,
-    session_id: Option<String>,
+    sessions: HashMap<String, PetSession>,
+    use_order: u64,
+}
+
+struct PetSession {
     stream: Option<Stream>,
     pending_events: VecDeque<Value>,
+    last_used: u64,
 }
 
 impl PetClient {
@@ -24,32 +35,66 @@ impl PetClient {
     pub fn new(endpoint: PathBuf) -> Self {
         Self {
             endpoint,
-            session_id: None,
-            stream: None,
-            pending_events: VecDeque::new(),
+            sessions: HashMap::new(),
+            use_order: 0,
         }
     }
 
-    fn bind_session(&mut self, session_id: &str) {
-        if self.session_id.as_deref() != Some(session_id) {
-            self.close();
-            self.pending_events.clear();
-            self.session_id = Some(session_id.to_string());
+    fn touch_session(&mut self, session_id: &str) {
+        self.use_order = self.use_order.saturating_add(1);
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.last_used = self.use_order;
+            return;
+        }
+
+        if self.sessions.len() >= MAX_SESSIONS {
+            self.evict_oldest_session();
+        }
+        self.sessions.insert(
+            session_id.to_string(),
+            PetSession {
+                stream: None,
+                pending_events: VecDeque::new(),
+                last_used: self.use_order,
+            },
+        );
+    }
+
+    fn evict_oldest_session(&mut self) {
+        let oldest_session_id = self
+            .sessions
+            .iter()
+            .min_by_key(|(_, session)| session.last_used)
+            .map(|(session_id, _)| session_id.clone())
+            .expect("a full session pool cannot be empty");
+        let mut session = self
+            .sessions
+            .remove(&oldest_session_id)
+            .expect("the selected session must exist");
+        session.close();
+    }
+
+    fn close_all(&mut self) {
+        for session in self.sessions.values_mut() {
+            session.close();
         }
     }
 
+    #[cfg(test)]
+    fn shutdown(&mut self) {
+        self.close_all();
+    }
+}
+
+impl PetSession {
     fn enqueue(&mut self, events: &[Value]) {
         self.pending_events.extend(events.iter().cloned());
         let overflow = self.pending_events.len().saturating_sub(MAX_PENDING_EVENTS);
         self.pending_events.drain(..overflow);
     }
 
-    fn connect(&mut self) -> io::Result<()> {
-        let session_id = self
-            .session_id
-            .as_deref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing session id"))?;
-        let name = self.endpoint.as_os_str().to_fs_name::<GenericFilePath>()?;
+    fn connect(&mut self, endpoint: &Path, session_id: &str) -> io::Result<()> {
+        let name = endpoint.as_os_str().to_fs_name::<GenericFilePath>()?;
         let mut stream = Stream::connect(name)?;
         write_line(
             &mut stream,
@@ -80,9 +125,9 @@ impl PetClient {
         Ok(())
     }
 
-    fn connect_and_flush(&mut self) -> io::Result<()> {
+    fn connect_and_flush(&mut self, endpoint: &Path, session_id: &str) -> io::Result<()> {
         if self.stream.is_none() {
-            self.connect()?;
+            self.connect(endpoint, session_id)?;
         }
         self.flush_pending()
     }
@@ -92,20 +137,22 @@ impl PetClient {
             let _ = write_line(&mut stream, &json!({ "type": "goodbye" }));
         }
     }
-
-    #[cfg(test)]
-    fn shutdown(&mut self) {
-        self.close();
-    }
 }
 
 impl PetTransport for PetClient {
     fn deliver(&mut self, session_id: &str, events: &[Value]) -> io::Result<()> {
-        self.bind_session(session_id);
-        self.enqueue(events);
-        if let Err(first_error) = self.connect_and_flush() {
-            self.stream = None;
-            self.connect_and_flush().map_err(|retry_error| {
+        self.touch_session(session_id);
+        let endpoint = self.endpoint.as_path();
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .expect("a touched session must exist");
+        session.enqueue(events);
+        if let Err(first_error) = session.connect_and_flush(endpoint, session_id) {
+            session.stream = None;
+            session
+                .connect_and_flush(endpoint, session_id)
+                .map_err(|retry_error| {
                 io::Error::new(
                     retry_error.kind(),
                     format!(
@@ -120,7 +167,7 @@ impl PetTransport for PetClient {
 
 impl Drop for PetClient {
     fn drop(&mut self) {
-        self.close();
+        self.close_all();
     }
 }
 
@@ -315,35 +362,130 @@ mod tests {
     fn bounds_pending_events_by_dropping_the_oldest() {
         let (_directory, endpoint) = test_endpoint();
         let mut client = PetClient::new(endpoint);
-        client.bind_session("session-1");
+        client.touch_session("session-1");
 
         let events = (0..MAX_PENDING_EVENTS + 2)
             .map(|sequence| json!({ "sequence": sequence }))
             .collect::<Vec<_>>();
-        client.enqueue(&events);
+        let session = client
+            .sessions
+            .get_mut("session-1")
+            .expect("session exists");
+        session.enqueue(&events);
 
-        assert_eq!(client.pending_events.len(), MAX_PENDING_EVENTS);
+        assert_eq!(session.pending_events.len(), MAX_PENDING_EVENTS);
         assert_eq!(
-            client.pending_events.front(),
+            session.pending_events.front(),
             Some(&json!({ "sequence": 2 }))
         );
         assert_eq!(
-            client.pending_events.back(),
+            session.pending_events.back(),
             Some(&json!({ "sequence": MAX_PENDING_EVENTS + 1 }))
         );
     }
 
     #[test]
-    fn discards_pending_events_when_the_session_changes() {
+    fn retains_independent_pending_queues_for_multiple_sessions() {
         let (_directory, endpoint) = test_endpoint();
         let mut client = PetClient::new(endpoint);
-        client.bind_session("session-1");
-        client.enqueue(&[json!({ "type": "agent_started" })]);
+        client.touch_session("session-1");
+        client
+            .sessions
+            .get_mut("session-1")
+            .expect("first session")
+            .enqueue(&[json!({ "type": "agent_started" })]);
+        client.touch_session("session-2");
+        client
+            .sessions
+            .get_mut("session-2")
+            .expect("second session")
+            .enqueue(&[json!({ "type": "turn_started" })]);
 
-        client.bind_session("session-2");
+        assert_eq!(client.sessions.len(), 2);
+        assert_eq!(
+            client.sessions["session-1"].pending_events.front(),
+            Some(&json!({ "type": "agent_started" }))
+        );
+        assert_eq!(
+            client.sessions["session-2"].pending_events.front(),
+            Some(&json!({ "type": "turn_started" }))
+        );
+    }
 
-        assert!(client.pending_events.is_empty());
-        assert_eq!(client.session_id.as_deref(), Some("session-2"));
+    #[test]
+    fn evicts_the_least_recently_used_session_when_the_pool_is_full() {
+        let (_directory, endpoint) = test_endpoint();
+        let mut client = PetClient::new(endpoint);
+        for sequence in 0..MAX_SESSIONS {
+            client.touch_session(&format!("session-{sequence}"));
+        }
+
+        client.touch_session("session-0");
+        client.touch_session("session-new");
+
+        assert_eq!(client.sessions.len(), MAX_SESSIONS);
+        assert!(client.sessions.contains_key("session-0"));
+        assert!(!client.sessions.contains_key("session-1"));
+        assert!(client.sessions.contains_key("session-new"));
+    }
+
+    #[test]
+    fn keeps_real_connections_open_for_interleaved_sessions() {
+        let (_directory, endpoint) = test_endpoint();
+        let name = endpoint
+            .as_os_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("valid test endpoint");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("create local listener");
+        let reader = thread::spawn(move || {
+            let mut streams = (0..2)
+                .map(|_| listener.accept().expect("accept bridge connection"))
+                .collect::<Vec<_>>();
+            streams
+                .iter_mut()
+                .map(|stream| {
+                    let mut text = String::new();
+                    stream
+                        .read_to_string(&mut text)
+                        .expect("read bridge messages");
+                    text
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let mut client = PetClient::new(endpoint);
+        client
+            .deliver("session-1", &[json!({ "type": "agent_started" })])
+            .expect("deliver first session event");
+        client
+            .deliver("session-2", &[json!({ "type": "agent_started" })])
+            .expect("deliver second session event");
+        client
+            .deliver("session-1", &[json!({ "type": "turn_started" })])
+            .expect("reuse first session connection");
+        client.shutdown();
+
+        let messages = reader
+            .join()
+            .expect("reader thread")
+            .into_iter()
+            .map(|text| {
+                text.lines()
+                    .map(|line| serde_json::from_str::<Value>(line).expect("valid JSON line"))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(messages[0][0]["sessionId"], "session-1");
+        assert_eq!(messages[0][1]["event"]["type"], "agent_started");
+        assert_eq!(messages[0][2]["event"]["type"], "turn_started");
+        assert_eq!(messages[0][3]["type"], "goodbye");
+        assert_eq!(messages[1][0]["sessionId"], "session-2");
+        assert_eq!(messages[1][1]["event"]["type"], "agent_started");
+        assert_eq!(messages[1][2]["type"], "goodbye");
     }
 
     fn test_endpoint() -> (Option<tempfile::TempDir>, PathBuf) {
