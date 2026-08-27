@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "codex-o-pet": {
+      "command": "./bin/codex-o-pet-bridge",
+      "env_vars": [
+        "XDG_RUNTIME_DIR",
+        "O_PET_ENDPOINT",
+        "O_PET_LOG"
+      ],
+      "required": false,
+      "startup_timeout_sec": 5,
+      "tool_timeout_sec": 2,
+      "cwd": "."
+    }
+  }
+}
