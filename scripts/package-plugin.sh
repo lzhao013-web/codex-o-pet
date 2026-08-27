@@ -69,7 +69,7 @@ manifest_path.write_text(
     encoding="utf-8",
 )
 
-mcp_path = plugin_root / "mcp.json"
+mcp_path = plugin_root / ".mcp.json"
 mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
 server = mcp["mcpServers"]["codex-o-pet"]
 server["command"] = "./bin/codex-o-pet-bridge"
@@ -125,7 +125,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 manifest = json.loads((root / "plugin/.codex-plugin/plugin.json").read_text())
-mcp = json.loads((root / "plugin/mcp.json").read_text())
+mcp = json.loads((root / "plugin/.mcp.json").read_text())
 marketplace = json.loads((root / ".agents/plugins/marketplace.json").read_text())
 
 assert manifest["name"] == "codex-o-pet"

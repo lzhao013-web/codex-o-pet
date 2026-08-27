@@ -1,13 +1,13 @@
 # codex-o-pet
 
-`codex-o-pet` 是 Codex CLI 与 [o-pet](https://github.com/Orion-zhen/o-pet) 之间的活动桥接插件。它监听 Codex 会话、提示词和工具调用等生命周期事件，并让 o-pet 桌宠播放对应动画。
+`codex-o-pet` 是 Codex CLI 与 [o-pet](https://github.com/Orion-zhen/o-pet) 之间的活动桥接插件。它监听 Codex 会话、提示词、工具调用、子代理和上下文压缩等生命周期事件，并让 o-pet 桌宠播放对应动画。
 
 本项目只转发活动状态，不包含 o-pet，也不会读取提示词正文、工具参数、工具输出或回复正文。
 
 ## 需要配合什么使用
 
 - [o-pet](https://github.com/Orion-zhen/o-pet)：负责显示桌宠和动画，需要单独安装并运行。
-- Codex CLI：需要支持插件、生命周期 Hooks 和 `mcp_tool` Hook。本项目已使用 Codex CLI `0.149.0` 验证。
+- Codex CLI：需要支持插件、生命周期 Hooks 和 `mcp_tool` Hook。本项目已使用 Codex CLI `0.150.1` 验证。
 
 发布版插件已包含 Bridge，不需要安装 Rust，也不需要手动执行 `cargo install`。支持 Windows x86_64、Linux x86_64/ARM64，以及 macOS Intel/Apple Silicon。
 
@@ -51,7 +51,7 @@ Codex 首次加载插件 Hooks 时可能要求审核。检查 Hook 定义后按�
 2. 启动新的 Codex 会话。
 3. 正常使用 Codex。桌宠会根据会话和工具调用状态播放动画。
 
-如果 o-pet 没有运行，插件不会中断 Codex 任务。Bridge 会在后续事件中重新尝试连接。
+如果 o-pet 没有运行，插件不会中断 Codex 任务。Bridge 会在内存中保留最近 256 条未发送的状态事件，并在后续 Hook 触发时重新连接和按顺序补发。同一 Bridge 进程切换到其他 Codex 会话时，旧会话的待发送事件会被丢弃。
 
 ## 工作方式
 
@@ -64,6 +64,13 @@ Codex lifecycle Hooks
 ```
 
 插件会将 `XDG_RUNTIME_DIR` 和 `O_PET_ENDPOINT` 从 Codex 的本地环境传递给 Bridge。Linux 默认使用 `$XDG_RUNTIME_DIR/o-pet.sock`；也可以通过 `O_PET_ENDPOINT` 环境变量覆盖 Bridge 与 o-pet 使用的 IPC 端点。
+
+当前 Hook 映射包括：
+
+- 会话和提示词活动。
+- 本地命令、文件修改、MCP 等可观察工具的开始与结束。
+- 子代理的实际运行周期；启动子代理的短暂工具调用会被去重。
+- 手动或自动上下文压缩，使用 o-pet 的 `skill` 工具动画表示。
 
 ## 发布
 
@@ -78,7 +85,8 @@ Codex lifecycle Hooks
 ## 当前限制
 
 - Codex 尚未提供精确的回复开始 Hook，桌宠会在 `Stop` 时播放回复完成动画。
-- 失败的工具调用可能保持工具动画，直到下一次状态更新或当前轮次结束。
+- Hook 没有统一的工具或子代理结果字段；插件会把已结束的生命周期报告为 `success`，因此可能缺少错误动画。
+- Codex 托管的工具（例如 `WebSearch`）不经过本地工具 Hook，插件无法观察其开始和结束。
 - 插件只向 o-pet 发送活动状态，不支持通过桌宠批准操作或提交提示词。
 
 ## 本地开发

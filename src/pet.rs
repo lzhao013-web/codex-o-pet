@@ -1,4 +1,4 @@
-use std::{env, io, io::Write, path::PathBuf};
+use std::{collections::VecDeque, env, io, io::Write, path::PathBuf};
 
 use interprocess::local_socket::{GenericFilePath, Stream, ToFsName as _, traits::Stream as _};
 use serde_json::{Value, json};
@@ -7,11 +7,13 @@ use crate::mcp::PetTransport;
 
 const ENDPOINT_ENV: &str = "O_PET_ENDPOINT";
 const CLIENT_ID: &str = "codex-o-pet";
+const MAX_PENDING_EVENTS: usize = 256;
 
 pub struct PetClient {
     endpoint: PathBuf,
     session_id: Option<String>,
     stream: Option<Stream>,
+    pending_events: VecDeque<Value>,
 }
 
 impl PetClient {
@@ -24,18 +26,22 @@ impl PetClient {
             endpoint,
             session_id: None,
             stream: None,
+            pending_events: VecDeque::new(),
         }
     }
 
-    fn bind_session(&mut self, session_id: &str) -> io::Result<()> {
+    fn bind_session(&mut self, session_id: &str) {
         if self.session_id.as_deref() != Some(session_id) {
             self.close();
+            self.pending_events.clear();
             self.session_id = Some(session_id.to_string());
         }
-        if self.stream.is_none() {
-            self.connect()?;
-        }
-        Ok(())
+    }
+
+    fn enqueue(&mut self, events: &[Value]) {
+        self.pending_events.extend(events.iter().cloned());
+        let overflow = self.pending_events.len().saturating_sub(MAX_PENDING_EVENTS);
+        self.pending_events.drain(..overflow);
     }
 
     fn connect(&mut self) -> io::Result<()> {
@@ -57,12 +63,11 @@ impl PetClient {
         Ok(())
     }
 
-    fn deliver_once(&mut self, events: &[Value]) -> io::Result<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "o-pet is not connected"))?;
-        for event in events {
+    fn flush_pending(&mut self) -> io::Result<()> {
+        while let Some(event) = self.pending_events.front() {
+            let stream = self.stream.as_mut().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "o-pet is not connected")
+            })?;
             write_line(
                 stream,
                 &json!({
@@ -70,8 +75,16 @@ impl PetClient {
                     "event": event,
                 }),
             )?;
+            self.pending_events.pop_front();
         }
         Ok(())
+    }
+
+    fn connect_and_flush(&mut self) -> io::Result<()> {
+        if self.stream.is_none() {
+            self.connect()?;
+        }
+        self.flush_pending()
     }
 
     fn close(&mut self) {
@@ -88,19 +101,18 @@ impl PetClient {
 
 impl PetTransport for PetClient {
     fn deliver(&mut self, session_id: &str, events: &[Value]) -> io::Result<()> {
-        self.bind_session(session_id)?;
-        if let Err(first_error) = self.deliver_once(events) {
+        self.bind_session(session_id);
+        self.enqueue(events);
+        if let Err(first_error) = self.connect_and_flush() {
             self.stream = None;
-            self.connect().and_then(|()| self.deliver_once(events)).map_err(
-                |retry_error| {
-                    io::Error::new(
-                        retry_error.kind(),
-                        format!(
-                            "o-pet delivery failed ({first_error}); reconnect failed ({retry_error})"
-                        ),
-                    )
-                },
-            )?;
+            self.connect_and_flush().map_err(|retry_error| {
+                io::Error::new(
+                    retry_error.kind(),
+                    format!(
+                        "o-pet delivery failed ({first_error}); reconnect failed ({retry_error})"
+                    ),
+                )
+            })?;
         }
         Ok(())
     }
@@ -238,6 +250,100 @@ mod tests {
                 json!({ "type": "goodbye" }),
             ]
         );
+    }
+
+    #[test]
+    fn replays_events_queued_before_o_pet_starts() {
+        let (_directory, endpoint) = test_endpoint();
+        let mut client = PetClient::new(endpoint.clone());
+        assert!(
+            client
+                .deliver("session-1", &[json!({ "type": "agent_started" })])
+                .is_err()
+        );
+
+        let name = endpoint
+            .as_os_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("valid test endpoint");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("create local listener");
+        let reader = thread::spawn(move || {
+            let mut stream = listener.accept().expect("accept bridge connection");
+            let mut text = String::new();
+            stream
+                .read_to_string(&mut text)
+                .expect("read bridge messages");
+            text
+        });
+
+        client
+            .deliver("session-1", &[json!({ "type": "turn_started" })])
+            .expect("reconnect and replay queued events");
+        client.shutdown();
+
+        let messages = reader
+            .join()
+            .expect("reader thread")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid JSON line"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![
+                json!({
+                    "type": "hello",
+                    "clientId": "codex-o-pet",
+                    "sessionId": "session-1",
+                }),
+                json!({
+                    "type": "event",
+                    "event": { "type": "agent_started" },
+                }),
+                json!({
+                    "type": "event",
+                    "event": { "type": "turn_started" },
+                }),
+                json!({ "type": "goodbye" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn bounds_pending_events_by_dropping_the_oldest() {
+        let (_directory, endpoint) = test_endpoint();
+        let mut client = PetClient::new(endpoint);
+        client.bind_session("session-1");
+
+        let events = (0..MAX_PENDING_EVENTS + 2)
+            .map(|sequence| json!({ "sequence": sequence }))
+            .collect::<Vec<_>>();
+        client.enqueue(&events);
+
+        assert_eq!(client.pending_events.len(), MAX_PENDING_EVENTS);
+        assert_eq!(
+            client.pending_events.front(),
+            Some(&json!({ "sequence": 2 }))
+        );
+        assert_eq!(
+            client.pending_events.back(),
+            Some(&json!({ "sequence": MAX_PENDING_EVENTS + 1 }))
+        );
+    }
+
+    #[test]
+    fn discards_pending_events_when_the_session_changes() {
+        let (_directory, endpoint) = test_endpoint();
+        let mut client = PetClient::new(endpoint);
+        client.bind_session("session-1");
+        client.enqueue(&[json!({ "type": "agent_started" })]);
+
+        client.bind_session("session-2");
+
+        assert!(client.pending_events.is_empty());
+        assert_eq!(client.session_id.as_deref(), Some("session-2"));
     }
 
     fn test_endpoint() -> (Option<tempfile::TempDir>, PathBuf) {

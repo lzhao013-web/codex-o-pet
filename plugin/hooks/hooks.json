@@ -74,6 +74,78 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "subagent_start",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}",
+              "agentId": "${agent_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "subagent_stop",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}",
+              "agentId": "${agent_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "pre_compact",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "codex-o-pet",
+            "tool": "emit",
+            "input": {
+              "kind": "post_compact",
+              "sessionId": "${session_id}",
+              "turnId": "${turn_id}"
+            },
+            "timeout": 2
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -144,13 +144,18 @@ fn tools_list() -> Value {
                             "user_prompt_submit",
                             "pre_tool_use",
                             "post_tool_use",
+                            "subagent_start",
+                            "subagent_stop",
+                            "pre_compact",
+                            "post_compact",
                             "stop"
                         ]
                     },
                     "sessionId": { "type": "string" },
                     "turnId": { "type": "string" },
                     "toolName": { "type": "string" },
-                    "toolUseId": { "type": "string" }
+                    "toolUseId": { "type": "string" },
+                    "agentId": { "type": "string" }
                 },
                 "required": ["kind", "sessionId"],
                 "additionalProperties": false
@@ -246,5 +251,37 @@ mod tests {
 
         assert_eq!(response["result"]["isError"], true);
         assert!(server.pet.deliveries.is_empty());
+    }
+
+    #[test]
+    fn every_plugin_hook_input_matches_the_emit_contract() {
+        let config = serde_json::from_str::<Value>(include_str!("../plugin/hooks/hooks.json"))
+            .expect("valid plugin hooks JSON");
+        let schema = tools_list();
+        let schema_kinds = schema["tools"][0]["inputSchema"]["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("emit kind enum");
+        let hook_groups = config["hooks"].as_object().expect("hook event map");
+        let mut input_count = 0;
+
+        for groups in hook_groups.values() {
+            for group in groups.as_array().expect("matcher groups") {
+                for hook in group["hooks"].as_array().expect("hook handlers") {
+                    let input = hook["input"].clone();
+                    let kind = input["kind"].as_str().expect("hook input kind").to_string();
+                    assert!(
+                        schema_kinds
+                            .iter()
+                            .any(|candidate| candidate == kind.as_str()),
+                        "hook kind {kind} is missing from the emit schema"
+                    );
+                    serde_json::from_value::<BridgeEvent>(input)
+                        .unwrap_or_else(|error| panic!("hook kind {kind} is invalid: {error}"));
+                    input_count += 1;
+                }
+            }
+        }
+
+        assert_eq!(input_count, 9);
     }
 }

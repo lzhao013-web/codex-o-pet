@@ -10,8 +10,7 @@
   "repository": "https://github.com/lzhao013-web/codex-o-pet",
   "license": "AGPL-3.0-only",
   "keywords": ["codex", "o-pet", "desktop-companion"],
-  "mcpServers": "./mcp.json",
-  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex o-pet",
     "shortDescription": "Visualize Codex activity with the o-pet desktop companion.",
@@ -20,6 +19,7 @@
     "category": "Developer Tools",
     "capabilities": ["Agent activity visualization"],
     "websiteURL": "https://github.com/lzhao013-web/codex-o-pet",
+    "defaultPrompt": ["Use Codex normally while o-pet visualizes agent activity."],
     "brandColor": "#6F8C7C"
   }
 }

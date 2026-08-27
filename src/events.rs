@@ -36,6 +36,34 @@ pub enum BridgeEvent {
         #[serde(rename = "toolUseId")]
         tool_use_id: String,
     },
+    SubagentStart {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "turnId")]
+        turn_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    SubagentStop {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "turnId")]
+        turn_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    PreCompact {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "turnId")]
+        turn_id: String,
+    },
+    PostCompact {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "turnId")]
+        turn_id: String,
+    },
     Stop {
         #[serde(rename = "sessionId")]
         session_id: String,
@@ -51,6 +79,10 @@ impl BridgeEvent {
             | Self::UserPromptSubmit { session_id, .. }
             | Self::PreToolUse { session_id, .. }
             | Self::PostToolUse { session_id, .. }
+            | Self::SubagentStart { session_id, .. }
+            | Self::SubagentStop { session_id, .. }
+            | Self::PreCompact { session_id, .. }
+            | Self::PostCompact { session_id, .. }
             | Self::Stop { session_id, .. } => session_id,
         }
     }
@@ -82,14 +114,50 @@ impl EventMapper {
                 tool_name,
                 tool_use_id,
                 ..
-            } => vec![json!({
+            } => {
+                if is_subagent_launcher(&tool_name) {
+                    Vec::new()
+                } else {
+                    vec![json!({
+                        "type": "tool_started",
+                        "toolCallId": tool_use_id,
+                        "toolName": normalize_tool_name(&tool_name),
+                    })]
+                }
+            }
+            BridgeEvent::PostToolUse {
+                tool_name,
+                tool_use_id,
+                ..
+            } => {
+                if is_subagent_launcher(&tool_name) {
+                    Vec::new()
+                } else {
+                    vec![json!({
+                        "type": "tool_finished",
+                        "toolCallId": tool_use_id,
+                        "outcome": "success",
+                    })]
+                }
+            }
+            BridgeEvent::SubagentStart { agent_id, .. } => vec![json!({
                 "type": "tool_started",
-                "toolCallId": tool_use_id,
-                "toolName": normalize_tool_name(&tool_name),
+                "toolCallId": agent_id,
+                "toolName": "skill",
             })],
-            BridgeEvent::PostToolUse { tool_use_id, .. } => vec![json!({
+            BridgeEvent::SubagentStop { agent_id, .. } => vec![json!({
                 "type": "tool_finished",
-                "toolCallId": tool_use_id,
+                "toolCallId": agent_id,
+                "outcome": "success",
+            })],
+            BridgeEvent::PreCompact { turn_id, .. } => vec![json!({
+                "type": "tool_started",
+                "toolCallId": compact_tool_call_id(&turn_id),
+                "toolName": "skill",
+            })],
+            BridgeEvent::PostCompact { turn_id, .. } => vec![json!({
+                "type": "tool_finished",
+                "toolCallId": compact_tool_call_id(&turn_id),
                 "outcome": "success",
             })],
             BridgeEvent::Stop { turn_id, .. } => {
@@ -113,6 +181,14 @@ impl EventMapper {
 
         MappedBatch { session_id, events }
     }
+}
+
+fn compact_tool_call_id(turn_id: &str) -> String {
+    format!("compact:{turn_id}")
+}
+
+fn is_subagent_launcher(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("spawn_agent") || tool_name.eq_ignore_ascii_case("agent")
 }
 
 fn normalize_tool_name(tool_name: &str) -> String {
@@ -230,5 +306,116 @@ mod tests {
         );
         assert_eq!(normalize_tool_name("Bash"), "bash");
         assert_eq!(normalize_tool_name("web_search"), "websearch");
+    }
+
+    #[test]
+    fn maps_subagent_lifecycle_and_suppresses_the_launcher_tool() {
+        let mut mapper = EventMapper::default();
+        let now = Instant::now();
+
+        let launcher = mapper.map(
+            BridgeEvent::PreToolUse {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+                tool_name: "spawn_agent".into(),
+                tool_use_id: "tool-1".into(),
+            },
+            now,
+        );
+        assert!(launcher.events.is_empty());
+
+        let started = mapper.map(
+            BridgeEvent::SubagentStart {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+                agent_id: "agent-1".into(),
+            },
+            now,
+        );
+        assert_eq!(
+            started.events,
+            vec![json!({
+                "type": "tool_started",
+                "toolCallId": "agent-1",
+                "toolName": "skill",
+            })]
+        );
+
+        let finished = mapper.map(
+            BridgeEvent::SubagentStop {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+                agent_id: "agent-1".into(),
+            },
+            now,
+        );
+        assert_eq!(
+            finished.events,
+            vec![json!({
+                "type": "tool_finished",
+                "toolCallId": "agent-1",
+                "outcome": "success",
+            })]
+        );
+
+        let launcher_finished = mapper.map(
+            BridgeEvent::PostToolUse {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+                tool_name: "SPAWN_AGENT".into(),
+                tool_use_id: "tool-1".into(),
+            },
+            now,
+        );
+        assert!(launcher_finished.events.is_empty());
+
+        let launcher_alias = mapper.map(
+            BridgeEvent::PreToolUse {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+                tool_name: "Agent".into(),
+                tool_use_id: "tool-2".into(),
+            },
+            now,
+        );
+        assert!(launcher_alias.events.is_empty());
+    }
+
+    #[test]
+    fn maps_compaction_as_one_skill_lifecycle() {
+        let mut mapper = EventMapper::default();
+        let now = Instant::now();
+
+        let started = mapper.map(
+            BridgeEvent::PreCompact {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+            },
+            now,
+        );
+        assert_eq!(
+            started.events,
+            vec![json!({
+                "type": "tool_started",
+                "toolCallId": "compact:turn-1",
+                "toolName": "skill",
+            })]
+        );
+
+        let finished = mapper.map(
+            BridgeEvent::PostCompact {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+            },
+            now,
+        );
+        assert_eq!(
+            finished.events,
+            vec![json!({
+                "type": "tool_finished",
+                "toolCallId": "compact:turn-1",
+                "outcome": "success",
+            })]
+        );
     }
 }
