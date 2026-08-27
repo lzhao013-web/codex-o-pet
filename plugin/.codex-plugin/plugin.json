@@ -1,6 +1,6 @@
 {
   "name": "codex-o-pet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drive an o-pet desktop companion from Codex lifecycle hooks.",
   "author": {
     "name": "lzhao013-web",
